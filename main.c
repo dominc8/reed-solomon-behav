@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-#include "temp.h"
 
 /* PREPROCESSOR BEGIN                   */
 
@@ -18,31 +17,29 @@ const static uint8_t poly_generator[N_SYMBOLS + 1] = { 0x1, 0xf, 0x36, 0x78, 0x4
 const static uint16_t poly_prime = 0x11d;
 
 
-
-
 static uint8_t poly_syndromes[N_SYMBOLS];
 static uint8_t poly_err_locator[N_SYMBOLS];
 static uint8_t poly_err_evaluator[N_SYMBOLS];
 static uint8_t poly_corruption[N_SYMBOLS/2];
 
-uint8_t poly_err_locator_size;
-uint8_t poly_err_evaluator_size;
+static uint8_t poly_err_locator_size;
+static uint8_t poly_err_evaluator_size;
 
 /* LOCAL OBJECTS END                    */
 
 
 /* LOCAL FUNCTIONS DECLARATIONS BEGIN   */
 
-inline static uint8_t gf_pow2(uint8_t pow);
-
+static uint8_t  gf_pow2(uint8_t pow);
 static uint8_t  gf_mult (uint8_t x, uint8_t y);  
+static uint8_t  gf_inv (uint8_t x);
 static uint8_t  gf_poly_evaluate (const uint8_t *polynomial, uint8_t size, uint8_t x);
 static void     gf_poly_scale (uint8_t *new_poly, const uint8_t *old_poly, uint8_t size, uint8_t scale);
 
 static void     compute_poly_syndromes (const uint8_t *encoded_message);
 static void     compute_poly_err_locator ();
 static void     compute_poly_err_evaluator ();
-static void     compute_poly_corruption ();
+static uint8_t  compute_poly_corruption ();
 
 static void     print_hex_n (const uint8_t *str, uint8_t length);
 /* LOCAL FUNCTIONS DECLARATIONS END     */
@@ -88,6 +85,8 @@ int main(int argc, char *argv[])
     \**********************/
     /* Simulating error in message */
     encoded_message[5] += 20;
+    encoded_message[10] -= 52;
+    encoded_message[20] -= 52;
 
 
     compute_poly_syndromes(encoded_message);
@@ -124,17 +123,22 @@ int main(int argc, char *argv[])
         else
         {
             /* Find the error/deviation from original message */
-            compute_poly_corruption();
+            if (compute_poly_corruption() == ERR_CODE)
+            {
+                printf("\nError locators error, message unrecoverable\n");
+            }
+            else
+            {
+                /* Subtract previously found deviation */
+                encoded_message[poly_err_evaluator[0]] ^= poly_corruption[0];
+                encoded_message[poly_err_evaluator[1]] ^= poly_corruption[1];
 
+                printf("\nRecovered message:\n");
+                print_hex_n(encoded_message, DATA_SIZE);
+                printf("\n");
+            }
         }
         
-        /* Subtract previously found deviation */
-        encoded_message[poly_err_evaluator[0]] ^= poly_corruption[0];
-        encoded_message[poly_err_evaluator[1]] ^= poly_corruption[1];
-
-        printf("\nRecovered message:\n");
-        print_hex_n(encoded_message, DATA_SIZE);
-        printf("\n");
     }
 
     return 0;
@@ -145,6 +149,24 @@ int main(int argc, char *argv[])
 
 
 /* LOCAL FUNCTIONS DEFINITIONS BEGIN    */
+
+/* Function for computing 2^pow */
+static uint8_t gf_pow2(uint8_t pow)
+{
+    uint16_t result = 1;
+    
+    while (pow-- > 0)
+    {
+        result <<= 1;
+        if (result & 0x0100)
+        {
+            result ^= poly_prime;
+        }
+    }
+
+    return (uint8_t)result;
+}
+
 
 /* Function for multiplying two numbers in GF(2^8) modulo poly_prime */
 static uint8_t gf_mult(uint8_t x, uint8_t y)
@@ -171,20 +193,16 @@ static uint8_t gf_mult(uint8_t x, uint8_t y)
     return result;
 }
 
-inline static uint8_t gf_pow2(uint8_t pow)
+/* Function for calculating inverse through brute-force*/
+static uint8_t gf_inv(uint8_t x)
 {
-    uint16_t result = 1;
-    
-    while (pow-- > 0)
-    {
-        result <<= 1;
-        if (result & 0x0100)
-        {
-            result ^= poly_prime;
-        }
-    }
+    /* Ignore edge case */
+    if (x == 0)     return 0;
 
-    return (uint8_t)result;
+    uint8_t y = 1;
+    while (gf_mult(x, y) != 1) ++y;
+
+    return y;
 }
 
 /* Function for evaluating value of polynomial at given x based on Horner's scheme */
@@ -293,8 +311,9 @@ static void compute_poly_err_evaluator ()
 }
 
 
-static void compute_poly_corruption ()
+static uint8_t compute_poly_corruption ()
 {
+    uint8_t ret_val = 0;
     if (poly_err_evaluator_size == 1)
     {
         uint8_t err_eval[2] = {
@@ -307,6 +326,7 @@ static void compute_poly_corruption ()
         uint8_t y           = gf_poly_evaluate(err_eval, 2, X_inv);
 
         poly_corruption[0]  = gf_mult(X, y);
+
     }
     else if (poly_err_evaluator_size == 2)
     {
@@ -329,6 +349,10 @@ static void compute_poly_corruption ()
 
         /* index 0 */
         scale_adjustment = 0x01 ^ gf_mult(X_inv[0], X[1]);
+        if (scale_adjustment == 0)
+        {
+            ret_val = ERR_CODE;
+        }
 
         y = gf_poly_evaluate(err_eval, 3, X_inv[0]);
         y = gf_mult(X[0], y);
@@ -336,11 +360,20 @@ static void compute_poly_corruption ()
 
         /* index 1 */
         scale_adjustment = 0x01 ^ gf_mult(X_inv[1], X[0]);
+        if (scale_adjustment == 0)
+        {
+            ret_val = ERR_CODE;
+        }
 
         y = gf_poly_evaluate(err_eval, 3, X_inv[1]);
         y = gf_mult(X[1], y);
         poly_corruption[1] = gf_mult(y, gf_inv(scale_adjustment));
     }
+    else
+    {
+        ret_val = ERR_CODE;
+    }
+    return ret_val;
 }
 
 
