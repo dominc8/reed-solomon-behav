@@ -14,6 +14,14 @@
 
 const static uint8_t poly_generator[N_SYMBOLS + 1] = { 0x1, 0xf, 0x36, 0x78, 0x40 }; /* Precomputed generator polynomial for 4 error correction symbols */
 const static uint16_t poly_prime = 0x11d;
+
+
+
+
+static uint8_t poly_syndromes[N_SYMBOLS];
+static uint8_t poly_err_locator[N_SYMBOLS];
+static uint8_t poly_err_evaluator[N_SYMBOLS];
+static uint8_t poly_corruption[N_SYMBOLS/2];
 /* LOCAL OBJECTS END                    */
 
 
@@ -28,6 +36,7 @@ static void     gf_poly_scale (uint8_t *new_poly, const uint8_t *old_poly, uint8
 static void     compute_poly_syndromes (uint8_t *poly_syndromes, const uint8_t *encoded_message);
 static uint8_t  compute_poly_err_locator (uint8_t *poly_err_locator, const uint8_t *poly_syndromes);
 static uint8_t  compute_poly_err_evaluator (uint8_t *poly_err_evaluator, const uint8_t *poly_err_locator);
+static uint8_t  compute_poly_corruption (uint8_t *poly_corruption, const uint8_t *poly_err_evaluator, uint8_t error_count);
 
 static void     print_hex_n (const uint8_t *str, uint8_t length);
 /* LOCAL FUNCTIONS DECLARATIONS END     */
@@ -40,7 +49,6 @@ int main(int argc, char *argv[])
                                              0x37, 0x17, 0x17, 0x73, 0x12, 0x91, 0x37, 0xab,
                                              0x1b, 0x3d, 0xd7, 0xe2 };
     uint8_t encoded_message[DATA_SIZE + N_SYMBOLS] = { 0 };
-    uint8_t coefficient;
 
 
     /**********************\
@@ -51,7 +59,7 @@ int main(int argc, char *argv[])
    
     for (uint8_t i = 0; i < DATA_SIZE; ++i)
     {
-        coefficient = encoded_message[i];
+        uint8_t coefficient = encoded_message[i];
 
         if (coefficient != 0)
         {
@@ -64,7 +72,7 @@ int main(int argc, char *argv[])
 
     memcpy(encoded_message, message_in, DATA_SIZE);
 
-    printf("Encoded 28-byte data to 32-byte data with last 4 bytes being error correction symbols: \n\n");
+    printf("Encoded 28-byte data to 32-byte data with last 4 bytes being error correction symbols: \n");
     print_hex_n(encoded_message, DATA_SIZE + N_SYMBOLS);
     printf("\n");
  
@@ -72,17 +80,15 @@ int main(int argc, char *argv[])
     /**********************\
      *      DECODING      *
     \**********************/
-    ++encoded_message[0];
-    ++encoded_message[1];
-    //++encoded_message[2];
-    uint8_t poly_syndromes[N_SYMBOLS];
+    encoded_message[5] += 20;
+
+
     compute_poly_syndromes(poly_syndromes, encoded_message);
 
     printf("Computed polynomial syndromes for encoded message: \n\n");
     print_hex_n(poly_syndromes, N_SYMBOLS);
     printf("\n");
 
-    uint8_t poly_err_locator[N_SYMBOLS];
     uint8_t poly_err_locator_size = compute_poly_err_locator(poly_err_locator, poly_syndromes);
 
     printf("Computed polynomial error locator with size %d for encoded message: \n\n", poly_err_locator_size);
@@ -99,12 +105,32 @@ int main(int argc, char *argv[])
     printf("Computed polynomial error locator with size %d for encoded message: \n\n", poly_err_locator_size);
     print_hex_n(poly_err_locator, N_SYMBOLS);
 
-    uint8_t poly_err_evaluator[N_SYMBOLS];
     uint8_t poly_err_evaluator_size = compute_poly_err_evaluator(poly_err_evaluator, poly_err_locator);
 
     printf("Computed polynomial error evaluator with size %d for encoded message: \n\n", poly_err_evaluator_size);
     print_hex_n(poly_err_evaluator, N_SYMBOLS);
     printf("\n");
+
+    compute_poly_corruption(poly_corruption, poly_err_evaluator, poly_err_evaluator_size);
+
+    printf("Computed polynomial corruption for encoded message: \n\n");
+    print_hex_n(poly_corruption, 2);
+    printf("\n");
+
+    
+    /* Fixing errors */
+
+    encoded_message[poly_err_evaluator[0]] ^= poly_corruption[0];
+    encoded_message[poly_err_evaluator[1]] ^= poly_corruption[1];
+
+    printf("First message: \n\n");
+    print_hex_n(message_in, DATA_SIZE);
+    printf("\nFixed message: \n\n");
+    print_hex_n(encoded_message, DATA_SIZE);
+    printf("\n");
+    
+
+
 
     return 0;
 }
@@ -289,6 +315,71 @@ static uint8_t compute_poly_err_evaluator (uint8_t *poly_err_evaluator, const ui
 
     return error_counter;
 }
+
+
+static uint8_t compute_poly_corruption (uint8_t *poly_corruption, const uint8_t *poly_err_evaluator, uint8_t error_count)
+{
+    if (error_count == 1)
+    {
+        uint8_t err_eval[2] = { gf_mult(poly_syndromes[0], poly_err_locator[2]), 0 };
+        uint8_t X_inv = gf_pow2(256 - DATA_SIZE - N_SYMBOLS + poly_err_evaluator[0]);
+        uint8_t X = gf_inv(X_inv);
+
+        printf("\nX: %d\n", X);
+        printf("\nX_inv: %d\n", X_inv);
+        printf("\nerr_eval:\n");
+        print_hex_n(err_eval, 2);
+
+        uint8_t y = gf_poly_evaluate(err_eval, 2, X_inv);
+        poly_corruption[0] = gf_mult(X, y);
+
+        //poly_corruption[0] = poly_err_evaluator[0];
+        //uint8_t err_inv = gf_inv(poly_err_evaluator[0]);
+        //uint8_t y = gf
+    }
+    else if (error_count == 2)
+    {
+        uint8_t err_eval[3] = { 
+                    gf_mult(poly_syndromes[1], poly_err_locator[1]) ^ gf_mult(poly_syndromes[0], poly_err_locator[2]),
+                    gf_mult(poly_syndromes[0], poly_err_locator[1]),
+                    0, 
+        };
+
+        uint8_t X_inv[2] = { 
+                    gf_pow2(256 - DATA_SIZE - N_SYMBOLS + poly_err_evaluator[0]),
+                    gf_pow2(256 - DATA_SIZE - N_SYMBOLS + poly_err_evaluator[1]) };
+        uint8_t X[2] = { gf_inv(X_inv[0]), gf_inv(X_inv[1]) };
+
+
+        printf("\nX:\n");
+        print_hex_n(X, 2);
+        printf("\nX_inv:\n");
+        print_hex_n(X_inv, 2);
+        printf("\nerr_eval:\n");
+        print_hex_n(err_eval, 3);
+
+
+
+        uint8_t err_loc_prime;
+        uint8_t y;
+        /* index 0 */
+        err_loc_prime = 0x01 ^ gf_mult(X_inv[0], X[1]);
+
+        y = gf_poly_evaluate(err_eval, 3, X_inv[0]);
+        y = gf_mult(X[0], y);
+        poly_corruption[0] = gf_mult(y, gf_inv(err_loc_prime));
+
+        /* index 1 */
+        err_loc_prime = 0x01 ^ gf_mult(X_inv[1], X[0]);
+
+        y = gf_poly_evaluate(err_eval, 3, X_inv[1]);
+        y = gf_mult(X[1], y);
+        poly_corruption[1] = gf_mult(y, gf_inv(err_loc_prime));
+    }
+
+    return 1;
+}
+
 
 /* Function for displaying uint8_t arrays in hex */
 static void print_hex_n (const uint8_t *str, uint8_t length)
