@@ -19,12 +19,15 @@ const static uint16_t poly_prime = 0x11d;
 
 /* LOCAL FUNCTIONS DECLARATIONS BEGIN   */
 
+inline static uint8_t gf_pow2(uint8_t pow);
+
 static uint8_t  gf_mult (uint8_t x, uint8_t y);  
 static uint8_t  gf_poly_evaluate (const uint8_t *polynomial, uint8_t size, uint8_t x);
 static void     gf_poly_scale (uint8_t *new_poly, const uint8_t *old_poly, uint8_t size, uint8_t scale);
 
 static void     compute_poly_syndromes (uint8_t *poly_syndromes, const uint8_t *encoded_message);
-static void     compute_poly_locator (uint8_t *poly_locator, const uint8_t *poly_syndromes);
+static uint8_t  compute_poly_err_locator (uint8_t *poly_err_locator, const uint8_t *poly_syndromes);
+static uint8_t  compute_poly_err_evaluator (uint8_t *poly_err_evaluator, const uint8_t *poly_err_locator);
 
 static void     print_hex_n (const uint8_t *str, uint8_t length);
 /* LOCAL FUNCTIONS DECLARATIONS END     */
@@ -71,6 +74,7 @@ int main(int argc, char *argv[])
     \**********************/
     ++encoded_message[0];
     ++encoded_message[1];
+    //++encoded_message[2];
     uint8_t poly_syndromes[N_SYMBOLS];
     compute_poly_syndromes(poly_syndromes, encoded_message);
 
@@ -78,11 +82,28 @@ int main(int argc, char *argv[])
     print_hex_n(poly_syndromes, N_SYMBOLS);
     printf("\n");
 
-    uint8_t poly_locator[N_SYMBOLS];
-    compute_poly_locator(poly_locator, poly_syndromes);
+    uint8_t poly_err_locator[N_SYMBOLS];
+    uint8_t poly_err_locator_size = compute_poly_err_locator(poly_err_locator, poly_syndromes);
 
-    printf("Computed polynomial locator for encoded message: \n\n");
-    print_hex_n(poly_locator, N_SYMBOLS);
+    printf("Computed polynomial error locator with size %d for encoded message: \n\n", poly_err_locator_size);
+    print_hex_n(poly_err_locator, N_SYMBOLS);
+
+    /* Invert order of coefficients in poly_err_locator */
+    for (uint8_t i = 0; i < N_SYMBOLS / 2; ++i)
+    {
+        poly_err_locator[i] ^= poly_err_locator[N_SYMBOLS - i - 1];
+        poly_err_locator[N_SYMBOLS - i - 1] ^= poly_err_locator[i];
+        poly_err_locator[i] ^= poly_err_locator[N_SYMBOLS - i - 1];
+    }
+    printf("\n");
+    printf("Computed polynomial error locator with size %d for encoded message: \n\n", poly_err_locator_size);
+    print_hex_n(poly_err_locator, N_SYMBOLS);
+
+    uint8_t poly_err_evaluator[N_SYMBOLS];
+    uint8_t poly_err_evaluator_size = compute_poly_err_evaluator(poly_err_evaluator, poly_err_locator);
+
+    printf("Computed polynomial error evaluator with size %d for encoded message: \n\n", poly_err_evaluator_size);
+    print_hex_n(poly_err_evaluator, N_SYMBOLS);
     printf("\n");
 
     return 0;
@@ -119,6 +140,22 @@ static uint8_t gf_mult(uint8_t x, uint8_t y)
     return result;
 }
 
+inline static uint8_t gf_pow2(uint8_t pow)
+{
+    uint16_t result = 1;
+    
+    while (pow-- > 0)
+    {
+        result <<= 1;
+        if (result & 0x0100)
+        {
+            result ^= poly_prime;
+        }
+    }
+
+    return (uint8_t)result;
+}
+
 /* Function for evaluating value of polynomial at given x based on Horner's scheme */
 static uint8_t gf_poly_evaluate(const uint8_t *polynomial, uint8_t size, uint8_t x)
 {
@@ -149,10 +186,10 @@ static void compute_poly_syndromes(uint8_t *poly_syndromes, const uint8_t *encod
 }
 
 /* Function for computing error locator polynomial (Berlekamp-Massey algorithm) */
-static void compute_poly_locator(uint8_t *poly_locator, const uint8_t *poly_syndromes)
+static uint8_t compute_poly_err_locator(uint8_t *poly_err_locator, const uint8_t *poly_syndromes)
 {
-    uint8_t curr_poly_locator[N_SYMBOLS] = { 1, 0, 0, 0 };
-    uint8_t old_poly_locator[N_SYMBOLS]  = { 1, 0, 0, 0 };
+    uint8_t curr_poly_err_locator[N_SYMBOLS] = { 1, 0, 0, 0 };
+    uint8_t old_poly_err_locator[N_SYMBOLS]  = { 1, 0, 0, 0 };
     uint8_t curr_size = 1;
     uint8_t old_size = 1;
     uint8_t discrepancy = 0;
@@ -168,7 +205,7 @@ static void compute_poly_locator(uint8_t *poly_locator, const uint8_t *poly_synd
         printf("discrepancy: %d\n", discrepancy);
         for (uint8_t j = 1; j < curr_size; ++j)
         {
-            discrepancy ^= gf_mult(curr_poly_locator[curr_size-j-1], poly_syndromes[i-j]);
+            discrepancy ^= gf_mult(curr_poly_err_locator[curr_size-j-1], poly_syndromes[i-j]);
         }
         printf("discrepancy: %d\n", discrepancy);
 
@@ -176,33 +213,36 @@ static void compute_poly_locator(uint8_t *poly_locator, const uint8_t *poly_synd
 
         if (discrepancy != 0)
         {
-            uint8_t temp_poly_locator[N_SYMBOLS];
+            uint8_t temp_poly_err_locator[N_SYMBOLS];
 
             printf("old_size=%d\ncurr_size=%d\n", old_size, curr_size);
 
 
             if (old_size > curr_size)
             {
-                gf_poly_scale(temp_poly_locator, old_poly_locator, N_SYMBOLS, discrepancy);
-                gf_poly_scale(old_poly_locator, curr_poly_locator, N_SYMBOLS, gf_inv(discrepancy));
+                gf_poly_scale(temp_poly_err_locator, old_poly_err_locator, N_SYMBOLS, discrepancy);
+                gf_poly_scale(old_poly_err_locator, curr_poly_err_locator, N_SYMBOLS, gf_inv(discrepancy));
+
+                /* swap old_size and curr_size */
                 old_size ^= curr_size;
                 curr_size ^= old_size;
                 old_size ^= curr_size;
-                memcpy(curr_poly_locator, temp_poly_locator, N_SYMBOLS);
+
+                memcpy(curr_poly_err_locator, temp_poly_err_locator, N_SYMBOLS);
 
                 printf("\ntemp_loc:\n");
-                print_hex_n(temp_poly_locator, N_SYMBOLS);
+                print_hex_n(temp_poly_err_locator, N_SYMBOLS);
                 printf("\n");
                 printf("\nold_loc:\n");
-                print_hex_n(old_poly_locator, N_SYMBOLS);
+                print_hex_n(old_poly_err_locator, N_SYMBOLS);
                 printf("\n");
                 printf("\ncurr_loc:\n");
-                print_hex_n(curr_poly_locator, N_SYMBOLS);
+                print_hex_n(curr_poly_err_locator, N_SYMBOLS);
                 printf("\n");
 
             }
 
-            gf_poly_scale(temp_poly_locator, old_poly_locator, N_SYMBOLS, discrepancy);
+            gf_poly_scale(temp_poly_err_locator, old_poly_err_locator, N_SYMBOLS, discrepancy);
 
             /* old_size <= curr_size */
             printf("old_size=%d\ncurr_size=%d\n", old_size, curr_size);
@@ -211,18 +251,43 @@ static void compute_poly_locator(uint8_t *poly_locator, const uint8_t *poly_synd
 
             for (uint8_t iter = size_shift; iter < N_SYMBOLS; ++iter)
             {
-                curr_poly_locator[iter] ^= temp_poly_locator[iter - size_shift];
+                curr_poly_err_locator[iter] ^= temp_poly_err_locator[iter - size_shift];
             }
 
             printf("\ncurr_loc:\n");
-            print_hex_n(curr_poly_locator, N_SYMBOLS);
+            print_hex_n(curr_poly_err_locator, N_SYMBOLS);
             printf("\n");
 
         }
     }
 
-    memcpy(poly_locator, curr_poly_locator, N_SYMBOLS);
+    memcpy(poly_err_locator, curr_poly_err_locator, N_SYMBOLS);
+    return curr_size;
+}
 
+
+static uint8_t compute_poly_err_evaluator (uint8_t *poly_err_evaluator, const uint8_t *poly_err_locator)
+{
+    uint8_t error_counter = 0;
+    /* Brute force checking */
+    for (uint8_t i = 0; i < DATA_SIZE + N_SYMBOLS; ++i)
+    {
+        /* Check every byte for condition to be root of polynomial error locator (the place where the erroc has happened) */
+        uint8_t poly_value = gf_poly_evaluate(poly_err_locator, N_SYMBOLS, gf_pow2(i));
+        printf("Poly value for gf_pow2(i)<i> [%d<%d>] is %d\n", gf_pow2(i), i, poly_value);
+        if (poly_value == 0)
+        {
+            printf("Found error\n");
+            if (2*error_counter >= N_SYMBOLS)
+            {
+                /* Found too many errors */
+                break;
+            }
+            poly_err_evaluator[error_counter++] = DATA_SIZE + N_SYMBOLS - 1 - i;
+        }
+    }
+
+    return error_counter;
 }
 
 /* Function for displaying uint8_t arrays in hex */
