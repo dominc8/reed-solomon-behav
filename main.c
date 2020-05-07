@@ -7,6 +7,8 @@
 
 #define N_SYMBOLS   4
 #define DATA_SIZE   28
+
+#define ERR_CODE    0xff
 /* PREPROCESSOR END                     */
 
 
@@ -22,6 +24,10 @@ static uint8_t poly_syndromes[N_SYMBOLS];
 static uint8_t poly_err_locator[N_SYMBOLS];
 static uint8_t poly_err_evaluator[N_SYMBOLS];
 static uint8_t poly_corruption[N_SYMBOLS/2];
+
+uint8_t poly_err_locator_size;
+uint8_t poly_err_evaluator_size;
+
 /* LOCAL OBJECTS END                    */
 
 
@@ -33,10 +39,10 @@ static uint8_t  gf_mult (uint8_t x, uint8_t y);
 static uint8_t  gf_poly_evaluate (const uint8_t *polynomial, uint8_t size, uint8_t x);
 static void     gf_poly_scale (uint8_t *new_poly, const uint8_t *old_poly, uint8_t size, uint8_t scale);
 
-static void     compute_poly_syndromes (uint8_t *poly_syndromes, const uint8_t *encoded_message);
-static uint8_t  compute_poly_err_locator (uint8_t *poly_err_locator, const uint8_t *poly_syndromes);
-static uint8_t  compute_poly_err_evaluator (uint8_t *poly_err_evaluator, const uint8_t *poly_err_locator);
-static uint8_t  compute_poly_corruption (uint8_t *poly_corruption, const uint8_t *poly_err_evaluator, uint8_t error_count);
+static void     compute_poly_syndromes (const uint8_t *encoded_message);
+static void     compute_poly_err_locator ();
+static void     compute_poly_err_evaluator ();
+static void     compute_poly_corruption ();
 
 static void     print_hex_n (const uint8_t *str, uint8_t length);
 /* LOCAL FUNCTIONS DECLARATIONS END     */
@@ -80,57 +86,56 @@ int main(int argc, char *argv[])
     /**********************\
      *      DECODING      *
     \**********************/
+    /* Simulating error in message */
     encoded_message[5] += 20;
 
 
-    compute_poly_syndromes(poly_syndromes, encoded_message);
+    compute_poly_syndromes(encoded_message);
 
-    printf("Computed polynomial syndromes for encoded message: \n\n");
-    print_hex_n(poly_syndromes, N_SYMBOLS);
-    printf("\n");
-
-    uint8_t poly_err_locator_size = compute_poly_err_locator(poly_err_locator, poly_syndromes);
-
-    printf("Computed polynomial error locator with size %d for encoded message: \n\n", poly_err_locator_size);
-    print_hex_n(poly_err_locator, N_SYMBOLS);
-
-    /* Invert order of coefficients in poly_err_locator */
-    for (uint8_t i = 0; i < N_SYMBOLS / 2; ++i)
+    /* Check if poly_syndromes is empty */
+    if (*((uint32_t *)(poly_syndromes)) == 0)
     {
-        poly_err_locator[i] ^= poly_err_locator[N_SYMBOLS - i - 1];
-        poly_err_locator[N_SYMBOLS - i - 1] ^= poly_err_locator[i];
-        poly_err_locator[i] ^= poly_err_locator[N_SYMBOLS - i - 1];
+        printf("Message is not corrupted\n");
     }
-    printf("\n");
-    printf("Computed polynomial error locator with size %d for encoded message: \n\n", poly_err_locator_size);
-    print_hex_n(poly_err_locator, N_SYMBOLS);
+    else
+    {
 
-    uint8_t poly_err_evaluator_size = compute_poly_err_evaluator(poly_err_evaluator, poly_err_locator);
+        printf("\nCorrupted message:\n");
+        print_hex_n(encoded_message, DATA_SIZE);
+        printf("\n");
 
-    printf("Computed polynomial error evaluator with size %d for encoded message: \n\n", poly_err_evaluator_size);
-    print_hex_n(poly_err_evaluator, N_SYMBOLS);
-    printf("\n");
+        /* Compute error locator polynomial */
+        compute_poly_err_locator();
+        
+        /* Invert order of coefficients in poly_err_locator for easier calculations later */
+        for (uint8_t i = 0; i < N_SYMBOLS / 2; ++i)
+        {
+            poly_err_locator[i] ^= poly_err_locator[N_SYMBOLS - i - 1];
+            poly_err_locator[N_SYMBOLS - i - 1] ^= poly_err_locator[i];
+            poly_err_locator[i] ^= poly_err_locator[N_SYMBOLS - i - 1];
+        }
 
-    compute_poly_corruption(poly_corruption, poly_err_evaluator, poly_err_evaluator_size);
+        /* Find indices of errors */
+        compute_poly_err_evaluator();
+        if (poly_err_evaluator_size == ERR_CODE)
+        {
+            printf("\nFound too many errors, message unrecoverable\n");
+        }
+        else
+        {
+            /* Find the error/deviation from original message */
+            compute_poly_corruption();
 
-    printf("Computed polynomial corruption for encoded message: \n\n");
-    print_hex_n(poly_corruption, 2);
-    printf("\n");
+        }
+        
+        /* Subtract previously found deviation */
+        encoded_message[poly_err_evaluator[0]] ^= poly_corruption[0];
+        encoded_message[poly_err_evaluator[1]] ^= poly_corruption[1];
 
-    
-    /* Fixing errors */
-
-    encoded_message[poly_err_evaluator[0]] ^= poly_corruption[0];
-    encoded_message[poly_err_evaluator[1]] ^= poly_corruption[1];
-
-    printf("First message: \n\n");
-    print_hex_n(message_in, DATA_SIZE);
-    printf("\nFixed message: \n\n");
-    print_hex_n(encoded_message, DATA_SIZE);
-    printf("\n");
-    
-
-
+        printf("\nRecovered message:\n");
+        print_hex_n(encoded_message, DATA_SIZE);
+        printf("\n");
+    }
 
     return 0;
 }
@@ -203,7 +208,7 @@ static void gf_poly_scale(uint8_t *new_poly, const uint8_t *old_poly, uint8_t si
 }
 
 /* Function for computing syndromes polynomial (treating message as polynomial and evaluating its value at points which should be its roots if the data is not damaged) */
-static void compute_poly_syndromes(uint8_t *poly_syndromes, const uint8_t *encoded_message)
+static void compute_poly_syndromes(const uint8_t *encoded_message)
 {
     for (uint8_t i = 0; i < N_SYMBOLS; ++i)
     {
@@ -212,37 +217,27 @@ static void compute_poly_syndromes(uint8_t *poly_syndromes, const uint8_t *encod
 }
 
 /* Function for computing error locator polynomial (Berlekamp-Massey algorithm) */
-static uint8_t compute_poly_err_locator(uint8_t *poly_err_locator, const uint8_t *poly_syndromes)
+static void compute_poly_err_locator()
 {
     uint8_t curr_poly_err_locator[N_SYMBOLS] = { 1, 0, 0, 0 };
     uint8_t old_poly_err_locator[N_SYMBOLS]  = { 1, 0, 0, 0 };
     uint8_t curr_size = 1;
     uint8_t old_size = 1;
     uint8_t discrepancy = 0;
-    //L = 0 # update flag variable, not needed here because we use an alternative equivalent way of checking if update is needed (but using the flag could potentially be faster depending on if using length(list) is taking linear time in your language, here in Python it's constant so it's as fast.
 
     for (uint8_t i = 0; i < N_SYMBOLS; ++i)
     {
-        printf("\ni=%d\n", i);
-
-        // K = i
         discrepancy = poly_syndromes[i];
 
-        printf("discrepancy: %d\n", discrepancy);
         for (uint8_t j = 1; j < curr_size; ++j)
         {
             discrepancy ^= gf_mult(curr_poly_err_locator[curr_size-j-1], poly_syndromes[i-j]);
         }
-        printf("discrepancy: %d\n", discrepancy);
-
         ++old_size;
 
         if (discrepancy != 0)
         {
             uint8_t temp_poly_err_locator[N_SYMBOLS];
-
-            printf("old_size=%d\ncurr_size=%d\n", old_size, curr_size);
-
 
             if (old_size > curr_size)
             {
@@ -255,23 +250,9 @@ static uint8_t compute_poly_err_locator(uint8_t *poly_err_locator, const uint8_t
                 old_size ^= curr_size;
 
                 memcpy(curr_poly_err_locator, temp_poly_err_locator, N_SYMBOLS);
-
-                printf("\ntemp_loc:\n");
-                print_hex_n(temp_poly_err_locator, N_SYMBOLS);
-                printf("\n");
-                printf("\nold_loc:\n");
-                print_hex_n(old_poly_err_locator, N_SYMBOLS);
-                printf("\n");
-                printf("\ncurr_loc:\n");
-                print_hex_n(curr_poly_err_locator, N_SYMBOLS);
-                printf("\n");
-
             }
 
             gf_poly_scale(temp_poly_err_locator, old_poly_err_locator, N_SYMBOLS, discrepancy);
-
-            /* old_size <= curr_size */
-            printf("old_size=%d\ncurr_size=%d\n", old_size, curr_size);
 
             uint8_t size_shift = curr_size - old_size;
 
@@ -279,20 +260,15 @@ static uint8_t compute_poly_err_locator(uint8_t *poly_err_locator, const uint8_t
             {
                 curr_poly_err_locator[iter] ^= temp_poly_err_locator[iter - size_shift];
             }
-
-            printf("\ncurr_loc:\n");
-            print_hex_n(curr_poly_err_locator, N_SYMBOLS);
-            printf("\n");
-
         }
     }
 
     memcpy(poly_err_locator, curr_poly_err_locator, N_SYMBOLS);
-    return curr_size;
+    poly_err_locator_size = curr_size;
 }
 
 
-static uint8_t compute_poly_err_evaluator (uint8_t *poly_err_evaluator, const uint8_t *poly_err_locator)
+static void compute_poly_err_evaluator ()
 {
     uint8_t error_counter = 0;
     /* Brute force checking */
@@ -300,12 +276,12 @@ static uint8_t compute_poly_err_evaluator (uint8_t *poly_err_evaluator, const ui
     {
         /* Check every byte for condition to be root of polynomial error locator (the place where the erroc has happened) */
         uint8_t poly_value = gf_poly_evaluate(poly_err_locator, N_SYMBOLS, gf_pow2(i));
-        printf("Poly value for gf_pow2(i)<i> [%d<%d>] is %d\n", gf_pow2(i), i, poly_value);
         if (poly_value == 0)
         {
             printf("Found error\n");
             if (2*error_counter >= N_SYMBOLS)
             {
+                error_counter = ERR_CODE;
                 /* Found too many errors */
                 break;
             }
@@ -313,71 +289,58 @@ static uint8_t compute_poly_err_evaluator (uint8_t *poly_err_evaluator, const ui
         }
     }
 
-    return error_counter;
+    poly_err_evaluator_size = error_counter;
 }
 
 
-static uint8_t compute_poly_corruption (uint8_t *poly_corruption, const uint8_t *poly_err_evaluator, uint8_t error_count)
+static void compute_poly_corruption ()
 {
-    if (error_count == 1)
+    if (poly_err_evaluator_size == 1)
     {
-        uint8_t err_eval[2] = { gf_mult(poly_syndromes[0], poly_err_locator[2]), 0 };
-        uint8_t X_inv = gf_pow2(256 - DATA_SIZE - N_SYMBOLS + poly_err_evaluator[0]);
-        uint8_t X = gf_inv(X_inv);
+        uint8_t err_eval[2] = {
+                                gf_mult(poly_syndromes[0], poly_err_locator[2]),
+                                0
+                              };
 
-        printf("\nX: %d\n", X);
-        printf("\nX_inv: %d\n", X_inv);
-        printf("\nerr_eval:\n");
-        print_hex_n(err_eval, 2);
+        uint8_t X_inv       = gf_pow2(256 - DATA_SIZE - N_SYMBOLS + poly_err_evaluator[0]);
+        uint8_t X           = gf_inv(X_inv);
+        uint8_t y           = gf_poly_evaluate(err_eval, 2, X_inv);
 
-        uint8_t y = gf_poly_evaluate(err_eval, 2, X_inv);
-        poly_corruption[0] = gf_mult(X, y);
-
-        //poly_corruption[0] = poly_err_evaluator[0];
-        //uint8_t err_inv = gf_inv(poly_err_evaluator[0]);
-        //uint8_t y = gf
+        poly_corruption[0]  = gf_mult(X, y);
     }
-    else if (error_count == 2)
+    else if (poly_err_evaluator_size == 2)
     {
         uint8_t err_eval[3] = { 
-                    gf_mult(poly_syndromes[1], poly_err_locator[1]) ^ gf_mult(poly_syndromes[0], poly_err_locator[2]),
-                    gf_mult(poly_syndromes[0], poly_err_locator[1]),
-                    0, 
-        };
+                                gf_mult(poly_syndromes[1], poly_err_locator[1]) ^ gf_mult(poly_syndromes[0], poly_err_locator[2]),
+                                gf_mult(poly_syndromes[0], poly_err_locator[1]),
+                                0
+                              };
 
         uint8_t X_inv[2] = { 
-                    gf_pow2(256 - DATA_SIZE - N_SYMBOLS + poly_err_evaluator[0]),
-                    gf_pow2(256 - DATA_SIZE - N_SYMBOLS + poly_err_evaluator[1]) };
-        uint8_t X[2] = { gf_inv(X_inv[0]), gf_inv(X_inv[1]) };
-
-
-        printf("\nX:\n");
-        print_hex_n(X, 2);
-        printf("\nX_inv:\n");
-        print_hex_n(X_inv, 2);
-        printf("\nerr_eval:\n");
-        print_hex_n(err_eval, 3);
-
-
-
-        uint8_t err_loc_prime;
+                             gf_pow2(256 - DATA_SIZE - N_SYMBOLS + poly_err_evaluator[0]),
+                             gf_pow2(256 - DATA_SIZE - N_SYMBOLS + poly_err_evaluator[1])
+                           };
+        uint8_t X[2] = {
+                         gf_inv(X_inv[0]),
+                         gf_inv(X_inv[1])
+                       };
+        uint8_t scale_adjustment;
         uint8_t y;
+
         /* index 0 */
-        err_loc_prime = 0x01 ^ gf_mult(X_inv[0], X[1]);
+        scale_adjustment = 0x01 ^ gf_mult(X_inv[0], X[1]);
 
         y = gf_poly_evaluate(err_eval, 3, X_inv[0]);
         y = gf_mult(X[0], y);
-        poly_corruption[0] = gf_mult(y, gf_inv(err_loc_prime));
+        poly_corruption[0] = gf_mult(y, gf_inv(scale_adjustment));
 
         /* index 1 */
-        err_loc_prime = 0x01 ^ gf_mult(X_inv[1], X[0]);
+        scale_adjustment = 0x01 ^ gf_mult(X_inv[1], X[0]);
 
         y = gf_poly_evaluate(err_eval, 3, X_inv[1]);
         y = gf_mult(X[1], y);
-        poly_corruption[1] = gf_mult(y, gf_inv(err_loc_prime));
+        poly_corruption[1] = gf_mult(y, gf_inv(scale_adjustment));
     }
-
-    return 1;
 }
 
 
@@ -392,4 +355,4 @@ static void print_hex_n (const uint8_t *str, uint8_t length)
 
 
 /* LOCAL FUNCTIONS DEFINITIONS END      */
-   
+
